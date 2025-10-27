@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <title>Monster Fetcher 🐉</title>
+  <style>
+    body { background:#0b0b0d; color:#e2d3ff; font-family:"Courier New", monospace; padding:20px; }
+    button { background:#7a00ff; color:#fff; padding:10px 20px; border:none; border-radius:8px; cursor:pointer; font-size:16px; margin-bottom:10px; transition:background .3s; }
+    button:hover { background:#b34cff; }
+    pre { background:#16161a; padding:15px; border-radius:10px; max-height:80vh; overflow:auto; }
+  </style>
+</head>
+<body>
+  <h1>👾 Fetch DOFUS Monsters 💀</h1>
+  <button id="fetchBtn">Summon & Download Batches (0 → 5000) ⚔️</button>
+  <p id="progress"></p>
+  <pre id="output"></pre>
+
+  <script>
+    // —— sacred constants (don’t shadow these below) ——
+    const BASE_URL = "https://api.dofusdb.fr/monsters?$sort[id]=-1&$populate=false&lang=fr";
+    const LIMIT    = 50;
+    const MAX      = 5000; // hard cap safeguard
+
+    // —— altar elements ——
+    const output   = document.getElementById("output");
+    const progress = document.getElementById("progress");
+
+    // —— grim grimoire helpers ——
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    async function fetchWithRetries(url, { retries = 3, baseDelayMs = 500 } = {}) {
+      let attempt = 0;
+      while (true) {
+        const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+        if (res.ok) return res.json();
+
+        const retriable = [429, 500, 502, 503, 504].includes(res.status);
+        if (!retriable || attempt >= retries) {
+          throw new Error(`HTTP ${res.status} after ${attempt + 1} attempt(s)`);
+        }
+        attempt++;
+        const serverRetry = Number(res.headers.get('Retry-After')) || 0;
+        const delay = serverRetry * 1000 || (baseDelayMs * Math.pow(2, attempt - 1) + Math.random() * 250);
+        await sleep(delay);
+      }
+    }
+
+    function downloadJSON(obj, filename) {
+      const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+      const url  = URL.createObjectURL(blob);
+      const a    = Object.assign(document.createElement("a"), { href: url, download: filename });
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    // —— the cleansing ritual: reparse & normalize into ONE [] ——
+    function reparseAndNormalize(input) {
+      let arr;
+
+      // 1) If someone passed a string that looks like "[...][...]" — stitch it
+      if (typeof input === 'string') {
+        try {
+          arr = JSON.parse(input);
+        } catch {
+          const stitched = '['
+            + input.trim()
+              .replace(/^\s*\[/, '')
+              .replace(/\]\s*$/, '')
+              .replace(/\]\s*\[\s*/g, ',')
+            + ']';
+          try { arr = JSON.parse(stitched); } catch { arr = []; }
+        }
+      }
+      // 2) If it's already an array, flatten nested arrays or {data:[]}
+      else if (Array.isArray(input)) {
+        arr = input.flatMap(x => {
+          if (Array.isArray(x)) return x;
+          if (x && Array.isArray(x.data)) return x.data;
+          return [x];
+        });
+      }
+      // 3) Handle { data: [...] } containers
+      else if (input && Array.isArray(input.data)) {
+        arr = input.data;
+      } else {
+        arr = [];
+      }
+
+      // Filter non-objects just in case
+      arr = arr.filter(v => v && typeof v === 'object');
+
+      // Dedupe by id/_id (fallback to full object)
+      const seen = new Set();
+      const out = [];
+      for (const item of arr) {
+        const key = item.id ?? item._id ?? JSON.stringify(item);
+        if (!seen.has(key)) {
+          seen.add(key);
+          out.push(item);
+        }
+      }
+
+      // Sort by id desc (matches $sort[id]=-1 vibe)
+      out.sort((a, b) => {
+        const A = a?.id ?? a?._id ?? 0;
+        const B = b?.id ?? b?._id ?? 0;
+        if (A < B) return 1;
+        if (A > B) return -1;
+        return 0;
+      });
+
+      return out;
+    }
+
+    // —— main ritual ——
+    document.getElementById("fetchBtn").addEventListener("click", async () => {
+      output.textContent   = "";
+      progress.textContent = "Starting dark ritual... 🕯️";
+
+      let totalMonsters = 0;
+      let pos = 0;
+
+      // toggle if you want ONE big file instead of many
+      const AGGREGATE = true; // merge all batches into one file
+      const all = [];
+
+      let knownTotal = undefined; // some endpoints return { total, data: [] }
+
+      for (let skip = 0, batch = 0; skip < MAX; skip += LIMIT, batch++) {
+        pos = skip; // current offset
+        const start = skip + 1;
+        const end   = Math.min(skip + LIMIT, MAX);
+        const url   = `${BASE_URL}&$limit=${LIMIT}&$skip=${skip}`;
+
+        progress.textContent = `Summoning batch ${batch} → monsters ${start} → ${end}... 😈`;
+        console.log("Fetching:", url);
+
+        try {
+          const json = await fetchWithRetries(url, { retries: 3, baseDelayMs: 500 });
+
+          // Feathers-like responses are { total, limit, skip, data: [...] }
+          // Direct array responses are [...]
+          const items = Array.isArray(json) ? json : Array.isArray(json?.data) ? json.data : [];
+          if (typeof json?.total === 'number') knownTotal = json.total;
+
+          if (!Array.isArray(items) || items.length === 0) {
+            console.log("No more creatures answered the call. 🕳️", { json });
+            break;
+          }
+
+          if (AGGREGATE) {
+            all.push(...items);
+          } else {
+            const filename = `batch_${String(batch).padStart(4, "0")}.json`;
+            // still allow per-batch downloads if AGGREGATE=false
+            // but we can cleanse here too if needed:
+            const clean = reparseAndNormalize(items);
+            downloadJSON(clean, filename);
+            console.log(`Batch ${batch} saved as ${filename} 🖤`);
+          }
+
+          totalMonsters += items.length;
+          await sleep(3); // breathe, my love
+
+          // Stop conditions
+          if (items.length < LIMIT) break; // last partial page
+          if (typeof knownTotal === 'number' && skip + LIMIT >= knownTotal) break; // reached reported total
+        } catch (err) {
+          progress.textContent = `⚠️ Error on batch ${batch} (skip=${skip}): ${err}`;
+          console.error(err);
+          break;
+        }
+      }
+
+      // —— JUST BEFORE DOWNLOAD: reparse & normalize into a single clean [] ——
+      if (AGGREGATE && all.length) {
+        const merged = reparseAndNormalize(all);
+        const filename = `dofus_monsters_${merged.length}.json`;
+        downloadJSON(merged, filename);
+        console.log(`All ${merged.length} monsters sealed into ${filename} 🗃️🕸️`);
+      }
+
+      progress.textContent = `🎉 Ritual complete! ${totalMonsters} monsters summoned from the void 💀`;
+      output.textContent   = `Downloaded ${AGGREGATE ? "a single tome" : "all batches"} successfully 💋`;
+      console.log("Final offset (pos):", pos, "Total:", totalMonsters, "Known total:", knownTotal);
+    });
+  </script>
+</body>
+</html>
